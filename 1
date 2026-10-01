@@ -1,0 +1,146 @@
+/**
+ * Google Apps Script: Generador de Listados Estudiantiles
+ * Descripción: Clasifica estudiantes por estado y especialidad, extrae notas de otra hoja
+ * y genera un documento final basado en una plantilla de Google Docs.
+ */
+
+// --- CONFIGURACIÓN (REEMPLAZAR CON TUS PROPIOS IDs) ---
+const ID_PLANTILLA_LISTADO = 'YOUR_TEMPLATE_DOC_ID_HERE'; 
+const ID_BASE_NOTAS_LISTADO = 'YOUR_SPREADSHEET_ID_HERE'; 
+const ID_CARPETA_DESTINO_LISTADO = 'YOUR_DRIVE_FOLDER_ID_HERE'; 
+
+function generarListadosEspecialidad() {
+  const ssMaestra = SpreadsheetApp.getActiveSpreadsheet();
+  const hojaMaestra = ssMaestra.getSheetByName('NOMBRE_DE_TU_HOJA'); // Reemplazar con el nombre de tu pestaña
+  const datosMaestra = hojaMaestra.getDataRange().getValues();
+  
+  const ssNotas = SpreadsheetApp.openById(ID_BASE_NOTAS_LISTADO);
+  const datosNotas = ssNotas.getSheets()[0].getDataRange().getValues();
+  
+  const carpetaBase = DriveApp.getFolderById(ID_CARPETA_DESTINO_LISTADO);
+  
+  // Arreglos para separar a los estudiantes
+  let egresados = [];
+  let pendientes = [];
+  let contadorEgresados = 1;
+  let contadorPendientes = 1;
+
+  // 1. Recorrer la Base Maestra y clasificar
+  for (let i = 1; i < datosMaestra.length; i++) {
+    let fila = datosMaestra[i];
+    let promocion = String(fila[0]).toUpperCase().trim(); // Columna A
+    let nombreCompleto = fila[1];                         // Columna B
+    let identificacion = String(fila[2]).trim();          // Columna C (DUI o ID)
+    let correo = String(fila[3]).trim();                  // Columna D
+    let especialidad = String(fila[4]).trim();            // Columna E
+    let estadoProyecto = String(fila[7]).toUpperCase().trim(); // Columna H
+    
+    // Filtro: Ajustar los strings a buscar ('COHORTE' y 'ESPECIALIDAD')
+    if (promocion === 'AÑO_O_COHORTE_AQUI' && especialidad.toLowerCase().includes('nombre_especialidad_aqui')) {
+      
+      // Buscar la nota global en la base de notas
+      let infoEstudiante = buscarInfoNotasListado(correo, identificacion, nombreCompleto, datosNotas);
+      let notaFinal = "N/A";
+      
+      if (infoEstudiante && infoEstudiante.notas['Nota General']) {
+        // Formatear nota: reemplazar el punto por coma si es necesario regionalmente
+        notaFinal = String(infoEstudiante.notas['Nota General']).replace('.', ',');
+      }
+      
+      // Clasificar según su estado
+      if (estadoProyecto === 'FINALIZADO') {
+        egresados.push([contadorEgresados, nombreCompleto, identificacion, especialidad, notaFinal]);
+        contadorEgresados++;
+      } else if (estadoProyecto === 'PENDIENTE') { 
+        pendientes.push([contadorPendientes, nombreCompleto, identificacion, especialidad, notaFinal]);
+        contadorPendientes++;
+      }
+    }
+  }
+
+  if (egresados.length === 0 && pendientes.length === 0) {
+    Logger.log("No se encontraron estudiantes con los criterios especificados.");
+    return;
+  }
+
+  // 2. Crear el documento a partir de la plantilla
+  let nombreArchivo = "Listados Oficiales - Especialidad y Promoción";
+  let archivoCopia = DriveApp.getFileById(ID_PLANTILLA_LISTADO).makeCopy(nombreArchivo, carpetaBase);
+  let doc = DocumentApp.openById(archivoCopia.getId());
+  let body = doc.getBody();
+  
+  let tablas = body.getTables();
+  
+  // 3. Llenar la Tabla 1 (Índice 0) -> FINALIZADOS
+  if (tablas.length > 0) {
+    llenarTablaListado(tablas[0], egresados);
+  }
+  
+  // 4. Llenar la Tabla 2 (Índice 1) -> PENDIENTES
+  if (tablas.length > 1) {
+    llenarTablaListado(tablas[1], pendientes);
+  } else {
+    Logger.log("Advertencia: Solo se encontró una tabla en la plantilla. No se pudieron generar los pendientes.");
+  }
+  
+  doc.saveAndClose();
+  Logger.log(`¡Éxito! Generados ${egresados.length} finalizados y ${pendientes.length} pendientes.`);
+}
+
+// Función para clonar y rellenar las filas de una tabla específica
+function llenarTablaListado(tabla, datosEstudiantes) {
+  if (datosEstudiantes.length === 0) {
+    // Si no hay estudiantes para esta tabla, borrar la fila de etiquetas para no dejar llaves visibles
+    tabla.removeRow(1);
+    return;
+  }
+
+  let filaPlantilla = tabla.getRow(1); // Fila con los placeholders {{N}}, {{Nombre}}, etc.
+  
+  for (let i = 0; i < datosEstudiantes.length; i++) {
+    let datos = datosEstudiantes[i];
+    let nuevaFila = tabla.appendTableRow(filaPlantilla.copy()); // Clonar el estilo
+    
+    nuevaFila.replaceText('{{N}}', datos[0].toString());
+    nuevaFila.replaceText('{{Nombre}}', datos[1]);
+    nuevaFila.replaceText('{{ID}}', datos[2]);
+    nuevaFila.replaceText('{{Especialidad}}', datos[3]);
+    nuevaFila.replaceText('{{Nota}}', datos[4]);
+  }
+  
+  // Borramos la fila original que sirvió como molde
+  tabla.removeRow(1); 
+}
+
+// Funciones auxiliares para buscar datos externos
+function buscarInfoNotasListado(correoBuscado, idBuscado, nombreBuscado, datosNotas) {
+  let correoB = correoBuscado.toLowerCase().trim();
+  let idB = idBuscado.replace(/-/g, '').trim();
+  let nombreArr = nombreBuscado.toLowerCase().split(' ');
+  let primerNombreB = nombreArr[0] || '';
+
+  for (let i = 1; i < datosNotas.length; i++) {
+    let correoNota = String(datosNotas[i][2]).toLowerCase().trim();
+    let idNota = String(datosNotas[i][3]).replace(/-/g, '').trim();
+    let nombreNotaCompleto = (String(datosNotas[i][0]) + " " + String(datosNotas[i][1])).toLowerCase();
+    
+    if (correoB !== '' && correoNota === correoB) {
+      return extraerNotaListado(datosNotas[i]);
+    } 
+    else if (idB !== '' && idNota === idB) {
+      return extraerNotaListado(datosNotas[i]);
+    }
+    else if (primerNombreB !== '' && nombreNotaCompleto.includes(primerNombreB) && nombreArr.length > 2 && nombreNotaCompleto.includes(nombreArr[2])) {
+      return extraerNotaListado(datosNotas[i]);
+    }
+  }
+  return null;
+}
+
+function extraerNotaListado(fila) {
+  let dictNotas = {};
+  // La nota global se asume a 4 columnas del final
+  let indexNota = fila.length - 4; 
+  dictNotas['Nota General'] = Number(fila[indexNota]).toFixed(2); 
+  return { notas: dictNotas };
+}
